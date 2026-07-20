@@ -22,6 +22,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q", type=float, default=0.0, help="flat continuous dividend yield")
     parser.add_argument("--min-volume", type=int, default=1)
     parser.add_argument("--min-open-interest", type=int, default=1)
+    parser.add_argument(
+        "--min-days-to-expiry",
+        type=float,
+        default=2.0,
+        help=(
+            "exclude contracts closer to expiry than this many days (default: 2). "
+            "Near-zero-vega, near-expiry contracts turn tiny bid-ask noise into "
+            "large IV swings under inversion -- a real numerical artifact, not a "
+            "data-quality issue, but it makes the plotted smile spiky and misleading."
+        ),
+    )
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached chain snapshot")
     parser.add_argument("--out", default=None, help="save the plot to this path instead of showing it interactively")
     return parser
@@ -44,7 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  {len(chain)} liquid quotes across {chain['expiry'].nunique()} expiries")
 
     print("Building implied vol surface...")
-    surface = build_surface(chain, r=args.r, q=args.q)
+    min_T = args.min_days_to_expiry / 365.0
+    surface = build_surface(chain, r=args.r, q=args.q, min_T=min_T)
     print(f"  solved IV for {len(surface)}/{len(chain)} contracts")
 
     parity = check_parity(chain, r=args.r, q=args.q)

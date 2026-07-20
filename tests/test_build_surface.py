@@ -69,6 +69,20 @@ def test_build_surface_skips_rows_that_fail_iv_solve():
     assert surface.empty
 
 
+def test_build_surface_excludes_contracts_inside_min_t():
+    near_expiry = dt.datetime(2026, 1, 2)  # 1 day out from AS_OF
+    far_expiry = dt.datetime(2026, 4, 1)
+    chain = pd.DataFrame(
+        [
+            _synthetic_row(100.0, 100.0, near_expiry, 0.2, "call"),
+            _synthetic_row(100.0, 100.0, far_expiry, 0.2, "call"),
+        ]
+    )
+    surface = build_surface(chain, r=R, q=Q, as_of=AS_OF, min_T=2.0 / 365.0)
+    assert len(surface) == 1
+    assert surface.loc[0, "expiry"] == far_expiry
+
+
 def test_year_fraction_nonnegative_and_zero_in_past():
     future = year_fraction(dt.datetime(2026, 7, 1), AS_OF)
     assert future > 0

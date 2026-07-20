@@ -59,3 +59,30 @@ def test_arg_parser_defaults():
     assert args.max_expiries == 6
     assert args.r == pytest.approx(0.04)
     assert args.q == pytest.approx(0.0)
+    assert args.min_days_to_expiry == pytest.approx(2.0)
+
+
+def test_main_excludes_near_expiry_contracts_by_default(monkeypatch, tmp_path):
+    as_of = dt.datetime.now()
+    tomorrow = as_of + dt.timedelta(days=1)
+    T = 1.0 / 365.0
+    mid = bs_price(100.0, 100.0, T, R, 0.2, "call", Q)
+    near_expiry_chain = pd.DataFrame(
+        [
+            {
+                "spot": 100.0,
+                "strike": 100.0,
+                "expiry": tomorrow,
+                "option_type": "call",
+                "mid": mid,
+                "bid": mid - 0.01,
+                "ask": mid + 0.01,
+                "volume": 100,
+                "openInterest": 100,
+            }
+        ]
+    )
+    monkeypatch.setattr(cli, "fetch_chain", lambda *a, **k: near_expiry_chain)
+
+    exit_code = cli.main(["--ticker", "TEST"])
+    assert exit_code == 1  # surface ends up empty since the only contract is 1 day out

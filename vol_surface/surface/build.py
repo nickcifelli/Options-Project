@@ -25,18 +25,25 @@ def build_surface(
     r: float = 0.04,
     q: float = 0.0,
     as_of: dt.datetime | None = None,
+    min_T: float = 0.0,
 ) -> pd.DataFrame:
     """Solve IV for every (strike, expiry, option_type) row with a valid mid price.
 
     Moneyness (K/S) and log-moneyness make strikes comparable across
     expiries, which raw strike values are not.
+
+    `min_T` excludes contracts closer to expiry than that (in years). Very
+    short-dated, deep ITM/OTM contracts have near-zero vega, so a one-cent
+    bid-ask difference can swing the inverted IV by tens of vol points --
+    real numerical instability, not a data-quality problem, but it produces
+    spiky, misleading smiles if left in by default.
     """
     as_of = as_of or dt.datetime.now()
     rows = []
 
     for _, row in chain.iterrows():
         T = year_fraction(row["expiry"], as_of)
-        if T <= 0:
+        if T <= min_T:
             continue
 
         result = implied_vol(row["mid"], row["spot"], row["strike"], T, r, row["option_type"], q)
