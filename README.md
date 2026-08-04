@@ -1,5 +1,9 @@
 # Options Pricer & Implied Volatility Surface
 
+[![tests](https://github.com/nickcifelli/Options-Project/actions/workflows/tests.yml/badge.svg)](https://github.com/nickcifelli/Options-Project/actions/workflows/tests.yml)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
 A small, self-contained Python project covering the core of derivatives
 pricing: closed-form European pricing, American early-exercise pricing via
 backward induction, implied vol extraction, and a real implied vol surface
@@ -7,6 +11,8 @@ built from live SPY options data.
 
 This is a pricing/analysis tool, not a trading strategy. Nothing here claims
 tradable edge.
+
+![Implied vol smile and surface for SPY](surface.png)
 
 ## Install
 
