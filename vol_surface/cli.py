@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 from vol_surface.data.chain import fetch_chain
 from vol_surface.surface.build import build_surface
 from vol_surface.surface.parity import check_parity
-from vol_surface.viz.plots import plot_smiles, plot_surface_3d
+from vol_surface.surface.svi import fit_svi_surface
+from vol_surface.viz.plots import plot_surface_3d, plot_svi_fit, plot_svi_surface_3d
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -67,9 +68,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("No IVs solved; skipping plot.", file=sys.stderr)
         return 1
 
+    print("Fitting SVI smile per expiry...")
+    svi_fits = fit_svi_surface(surface)
+    n_svi_ok = sum(fit.ok for fit in svi_fits.values())
+    print(f"  SVI fit converged for {n_svi_ok}/{len(svi_fits)} expiries")
+
     fig = plt.figure(figsize=(14, 6))
-    plot_smiles(surface, ax=fig.add_subplot(1, 2, 1))
-    plot_surface_3d(surface, ax=fig.add_subplot(1, 2, 2, projection="3d"))
+    plot_svi_fit(surface, svi_fits, ax=fig.add_subplot(1, 2, 1))
+    if n_svi_ok:
+        plot_svi_surface_3d(svi_fits, ax=fig.add_subplot(1, 2, 2, projection="3d"))
+    else:
+        print("  no SVI fits converged; falling back to the raw triangulated surface", file=sys.stderr)
+        plot_surface_3d(surface, ax=fig.add_subplot(1, 2, 2, projection="3d"))
     fig.tight_layout()
 
     if args.out:

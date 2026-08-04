@@ -5,9 +5,11 @@ from __future__ import annotations
 import datetime as dt
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from vol_surface.surface.build import year_fraction
+from vol_surface.surface.svi import SVIFitResult
 
 
 def plot_smiles(surface: pd.DataFrame, x: str = "moneyness", ax: plt.Axes | None = None) -> plt.Axes:
@@ -24,13 +26,46 @@ def plot_smiles(surface: pd.DataFrame, x: str = "moneyness", ax: plt.Axes | None
     return ax
 
 
+def plot_svi_fit(
+    surface: pd.DataFrame,
+    fits: dict[pd.Timestamp, SVIFitResult],
+    as_of: dt.datetime | None = None,
+    ax: plt.Axes | None = None,
+) -> plt.Axes:
+    """Market IV points per expiry overlaid with their fitted SVI smile
+    (see `surface/svi.py`). Expiries whose fit didn't converge still show
+    their market points, just without a curve."""
+    ax = ax or plt.gca()
+    as_of = as_of or dt.datetime.now()
+
+    for i, (expiry, group) in enumerate(surface.sort_values("log_moneyness").groupby("expiry")):
+        color = f"C{i % 10}"
+        label = pd.Timestamp(expiry).date().isoformat()
+        ax.scatter(group["log_moneyness"], group["iv"], s=14, color=color, label=label)
+
+        fit = fits.get(expiry)
+        if fit is not None and fit.ok:
+            T = year_fraction(expiry, as_of)
+            lo, hi = fit.k_range or (group["log_moneyness"].min(), group["log_moneyness"].max())
+            k_grid = np.linspace(lo, hi, 200)
+            ax.plot(k_grid, fit.params.implied_vol(k_grid, T), color=color, linewidth=1.5)
+
+    ax.set_xlabel("log-moneyness (log(K/S))")
+    ax.set_ylabel("implied vol")
+    ax.set_title("Implied vol smile: market vs. SVI fit")
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_surface_3d(
     surface: pd.DataFrame,
     as_of: dt.datetime | None = None,
     ax: plt.Axes | None = None,
 ) -> plt.Axes:
-    """3D surface (moneyness x time-to-expiry x IV) via triangulation, since
-    strikes differ per expiry and don't form a regular grid."""
+    """3D surface (moneyness x time-to-expiry x IV) via triangulation of the
+    raw market quotes, since strikes differ per expiry and don't form a
+    regular grid. Noisy by construction -- see `plot_svi_surface_3d` for
+    the smoothed, arbitrage-checked equivalent."""
     as_of = as_of or dt.datetime.now()
     if ax is None:
         ax = plt.figure().add_subplot(projection="3d")
@@ -41,6 +76,54 @@ def plot_surface_3d(
     ax.set_ylabel("T (years)")
     ax.set_zlabel("implied vol")
     ax.set_title("Implied vol surface")
+    return ax
+
+
+def plot_svi_surface_3d(
+    fits: dict[pd.Timestamp, SVIFitResult],
+    as_of: dt.datetime | None = None,
+    n_k: int = 400,
+    ax: plt.Axes | None = None,
+) -> plt.Axes:
+    """3D surface (moneyness x time-to-expiry x IV) built from the fitted
+    SVI curves rather than raw quotes: smooth, and free of the
+    negative-total-variance arbitrage `fit_svi_slice` already excludes.
+
+    Each expiry contributes only over the log-moneyness window it was
+    actually fit on (`SVIFitResult.k_range`), matching `plot_svi_fit`;
+    expiries whose fit didn't converge are skipped.
+
+    `n_k` is how densely each expiry's curve is sampled before
+    triangulation -- raising it smooths the surface *within* an expiry.
+    It can't smooth *across* expiries: there are only as many T-slices as
+    fitted expiries, so the surface is faceted between them regardless
+    (real term-structure gaps, not a rendering artifact -- interpolating
+    across them would be inventing data for expiries nobody quoted).
+    """
+    as_of = as_of or dt.datetime.now()
+    if ax is None:
+        ax = plt.figure().add_subplot(projection="3d")
+
+    moneyness, T_years, iv = [], [], []
+    for expiry, fit in fits.items():
+        if not fit.ok:
+            continue
+        T = year_fraction(expiry, as_of)
+        k_grid = np.linspace(*fit.k_range, n_k)
+        moneyness.append(np.exp(k_grid))
+        T_years.append(np.full(n_k, T))
+        iv.append(fit.params.implied_vol(k_grid, T))
+
+    if not moneyness:
+        raise ValueError("no SVI fits converged; nothing to plot")
+
+    ax.plot_trisurf(
+        np.concatenate(moneyness), np.concatenate(T_years), np.concatenate(iv), cmap="viridis", linewidth=0.2, antialiased=True
+    )
+    ax.set_xlabel("moneyness (K/S)")
+    ax.set_ylabel("T (years)")
+    ax.set_zlabel("implied vol")
+    ax.set_title("Implied vol surface (SVI fit)")
     return ax
 
 
