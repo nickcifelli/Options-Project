@@ -1,4 +1,4 @@
-"""CLI entry point: fetch -> build -> plot -> report."""
+"""CLI entry point: fetch -> build -> fit -> check -> localvol -> plot -> report."""
 
 from __future__ import annotations
 
@@ -7,12 +7,15 @@ import sys
 from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from vol_surface.data.chain import fetch_chain
+from vol_surface.surface.arbitrage import check_butterfly, check_calendar
 from vol_surface.surface.build import build_surface
+from vol_surface.surface.local_vol import build_local_vol_surface
 from vol_surface.surface.parity import check_parity
 from vol_surface.surface.svi import fit_svi_surface
-from vol_surface.viz.plots import plot_surface_3d, plot_svi_fit, plot_svi_surface_3d
+from vol_surface.viz.plots import plot_local_vol_surface_3d, plot_surface_3d, plot_svi_fit, plot_svi_surface_3d
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -32,6 +35,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Near-zero-vega, near-expiry contracts turn tiny bid-ask noise into "
             "large IV swings under inversion -- a real numerical artifact, not a "
             "data-quality issue, but it makes the plotted smile spiky and misleading."
+        ),
+    )
+    parser.add_argument(
+        "--min-expiry-gap-days",
+        type=float,
+        default=7.0,
+        help=(
+            "minimum spacing between expiries used for the local vol dw/dT "
+            "difference (default: 7). Underlyings with daily expiries put "
+            "neighbouring slices one day apart, and differencing total "
+            "variance across that gap amplifies each slice's fit residual by "
+            "roughly 365x -- noise, not term structure."
         ),
     )
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached chain snapshot")
@@ -73,13 +88,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     n_svi_ok = sum(fit.ok for fit in svi_fits.values())
     print(f"  SVI fit converged for {n_svi_ok}/{len(svi_fits)} expiries")
 
-    fig = plt.figure(figsize=(14, 6))
-    plot_svi_fit(surface, svi_fits, ax=fig.add_subplot(1, 2, 1))
+    print("Checking static no-arbitrage conditions...")
+    butterfly = check_butterfly(svi_fits, r=args.r, q=args.q)
+    calendar = check_calendar(svi_fits, r=args.r, q=args.q)
+    print(f"  butterfly: {int(butterfly['flagged'].sum())}/{len(butterfly)} slices imply a negative density somewhere")
+    if butterfly["flagged"].any():
+        worst = butterfly.loc[butterfly["min_g"].idxmin()]
+        print(f"    worst: {pd.Timestamp(worst['expiry']).date()} g={worst['min_g']:.4f} at k={worst['k_at_min_g']:+.3f}")
+    print(f"  calendar: {int(calendar['flagged'].sum())}/{len(calendar)} adjacent expiry pairs drop in total variance")
+    if calendar["flagged"].any():
+        worst = calendar.loc[calendar["max_variance_drop"].idxmax()]
+        near, far = pd.Timestamp(worst["near_expiry"]).date(), pd.Timestamp(worst["far_expiry"]).date()
+        print(f"    worst: {near} over {far} by {worst['max_variance_drop']:.5f} at k={worst['k_at_max_drop']:+.3f}")
+
+    print("Deriving Dupire local vol surface...")
+    try:
+        local_vol = build_local_vol_surface(
+            svi_fits, r=args.r, q=args.q, min_expiry_gap=args.min_expiry_gap_days / 365.0
+        )
+        print(f"  {len(local_vol.T)} slices after gap thinning; local vol defined at {local_vol.coverage:.1%} of grid points")
+    except ValueError as exc:
+        local_vol = None
+        print(f"  skipped: {exc}", file=sys.stderr)
+
+    n_panels = 3 if local_vol is not None else 2
+    fig = plt.figure(figsize=(7 * n_panels, 6))
+    plot_svi_fit(surface, svi_fits, ax=fig.add_subplot(1, n_panels, 1))
     if n_svi_ok:
-        plot_svi_surface_3d(svi_fits, ax=fig.add_subplot(1, 2, 2, projection="3d"))
+        plot_svi_surface_3d(svi_fits, ax=fig.add_subplot(1, n_panels, 2, projection="3d"))
     else:
         print("  no SVI fits converged; falling back to the raw triangulated surface", file=sys.stderr)
-        plot_surface_3d(surface, ax=fig.add_subplot(1, 2, 2, projection="3d"))
+        plot_surface_3d(surface, ax=fig.add_subplot(1, n_panels, 2, projection="3d"))
+    if local_vol is not None:
+        plot_local_vol_surface_3d(local_vol, ax=fig.add_subplot(1, n_panels, 3, projection="3d"))
     fig.tight_layout()
 
     if args.out:

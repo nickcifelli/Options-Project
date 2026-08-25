@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from vol_surface.surface.build import year_fraction
+from vol_surface.surface.local_vol import LocalVolSurface
 from vol_surface.surface.svi import SVIFitResult
 
 
@@ -149,4 +150,32 @@ def plot_surface_heatmap(
     ax.set_ylabel("expiry")
     ax.set_title("Implied vol surface (heatmap)")
     plt.colorbar(im, ax=ax, label="implied vol")
+    return ax
+
+
+def plot_local_vol_surface_3d(
+    local_vol: LocalVolSurface,
+    ax: plt.Axes | None = None,
+) -> plt.Axes:
+    """3D Dupire local vol surface (forward moneyness x T x local vol).
+
+    Drawn on the regular grid `build_local_vol_surface` returns, so this
+    is `plot_surface` rather than the triangulation the market-quote plots
+    need. Deliberately a different colormap from the implied vol panels:
+    the two are different quantities on similar-looking axes, and reading
+    one for the other is the easiest mistake to make here.
+
+    Grid points where local vol does not exist are `NaN` and render as
+    holes -- the honest depiction, since the surface genuinely implies no
+    real instantaneous vol there.
+    """
+    if ax is None:
+        ax = plt.figure().add_subplot(projection="3d")
+
+    forward_moneyness, T = np.meshgrid(np.exp(local_vol.k), local_vol.T)
+    ax.plot_surface(forward_moneyness, T, local_vol.local_vol, cmap="magma", linewidth=0.2, antialiased=True)
+    ax.set_xlabel("forward moneyness (K/F)")
+    ax.set_ylabel("T (years)")
+    ax.set_zlabel("local vol")
+    ax.set_title("Dupire local vol surface")
     return ax

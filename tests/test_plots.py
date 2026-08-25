@@ -8,8 +8,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from vol_surface.surface.local_vol import build_local_vol_surface
 from vol_surface.surface.svi import SVIFitResult, SVIParams
-from vol_surface.viz.plots import plot_smiles, plot_surface_3d, plot_surface_heatmap, plot_svi_fit, plot_svi_surface_3d
+from vol_surface.viz.plots import (
+    plot_local_vol_surface_3d,
+    plot_smiles,
+    plot_surface_3d,
+    plot_surface_heatmap,
+    plot_svi_fit,
+    plot_svi_surface_3d,
+)
 
 AS_OF = dt.datetime(2026, 1, 1)
 
@@ -124,3 +132,19 @@ def test_plot_svi_surface_3d_raises_when_nothing_converged():
 
     with pytest.raises(ValueError, match="no SVI fits converged"):
         plot_svi_surface_3d(fits, as_of=AS_OF)
+
+
+def test_plot_local_vol_surface_3d_renders_the_dupire_grid():
+    fits = {
+        AS_OF + dt.timedelta(days=days): SVIFitResult(
+            SVIParams(a=0.04 * days / 365.0, b=0.10 * days / 365.0, rho=-0.4, m=0.0, sigma=0.2),
+            k_range=(-0.2, 0.2),
+        )
+        for days in (30, 90, 180)
+    }
+
+    ax = plot_local_vol_surface_3d(build_local_vol_surface(fits, r=0.0, q=0.0, as_of=AS_OF))
+
+    assert ax.get_zlabel() == "local vol"
+    assert len(ax.collections) == 1
+    plt.close(ax.figure)

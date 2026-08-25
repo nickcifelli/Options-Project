@@ -12,7 +12,10 @@ built from live SPY options data.
 This is a pricing/analysis tool, not a trading strategy. Nothing here claims
 tradable edge.
 
-![Implied vol smile and surface for SPY](surface.png)
+![SPY implied vol smile, SVI surface, and Dupire local vol surface](surface.png)
+
+*Pictured: `--max-expiries 22` (see [Why the pictured run widens the
+ladder](#why-the-pictured-run-widens-the-ladder)).*
 
 ## Install
 
@@ -27,12 +30,14 @@ python3 -m venv .venv
 .venv/bin/vol-surface --ticker SPY --out surface.png
 ```
 
-or `python -m vol_surface.cli ...`. Runs `fetch -> build -> fit -> plot ->
-report`: pulls a live options chain, solves implied vol per contract, fits
-an SVI curve to each expiry's smile, checks put-call parity as a
-data-quality sanity check, and saves (or shows) a smile + 3D surface plot.
-See `--help` for the full set of flags (rate, dividend yield, liquidity
-thresholds, near-expiry cutoff, cache control).
+or `python -m vol_surface.cli ...`. Runs `fetch -> build -> fit -> check ->
+local vol -> plot -> report`: pulls a live options chain, solves implied vol
+per contract, fits an SVI curve to each expiry's smile, checks put-call
+parity plus the two static no-arbitrage conditions, derives the Dupire local
+vol surface, and saves (or shows) a smile + implied vol surface + local vol
+surface plot. See `--help` for the full set of flags (rate, dividend yield,
+liquidity thresholds, near-expiry cutoff, expiry-gap thinning, cache
+control).
 
 ## Tests
 
@@ -54,9 +59,11 @@ vol_surface/
     build.py               # strike/expiry -> IV grid construction
     svi.py                   # SVI curve fit per expiry (Gatheral raw parameterization)
     parity.py               # put-call parity check across the chain
+    arbitrage.py            # butterfly + calendar no-arbitrage checks on the fit
+    local_vol.py            # Dupire local vol, derived from the SVI slices
   viz/
-    plots.py                # smile + SVI fit, raw and SVI-sampled 3D surfaces
-  cli.py                     # entry point: fetch -> build -> fit -> plot -> report
+    plots.py                # smile + SVI fit, IV surfaces, local vol surface
+  cli.py                     # entry point: fetch -> build -> fit -> check -> plot
 tests/
 data/                        # gitignored, cached raw chain snapshots
 ```
@@ -82,13 +89,15 @@ the early-exercise boundary itself is part of what you're solving for.
 
 ## What's shown here
 
-A live run against SPY (6 expiries, spanning ~1 to ~15 weeks out) pulled
-2,061 quotes that passed the liquidity filter (non-zero volume/OI, uncrossed
-bid-ask), solved implied vol for 2,023 of them, and flagged 219 of 801
-call/put pairs as deviating from put-call parity by more than their combined
-bid-ask spread -- the rest of the drop from 2,061 to 2,023 is mostly
-contracts priced outside the no-arbitrage bounds implied by the observed mid
-(stale quotes) plus the near-expiry exclusion described below.
+The pictured run against SPY (22 expiries, spanning ~3 days to ~5 months
+out) pulled 6,044 quotes that passed the liquidity filter (non-zero
+volume/OI, uncrossed bid-ask), solved implied vol for 5,321 of them, and
+flagged 475 of 2,204 call/put pairs as deviating from put-call parity by
+more than their combined bid-ask spread -- the rest of the drop from 6,044
+to 5,321 is mostly contracts priced outside the no-arbitrage bounds implied
+by the observed mid (stale quotes) plus the near-expiry exclusion described
+below. SVI converged on all 19 expiries that survived the near-expiry
+cutoff.
 
 **Skew shape.** SPY (like most equity index underlyings) shows a downward
 skew: implied vol rises as strike falls below spot and is lowest near/just
@@ -121,6 +130,84 @@ excludes. `plot_surface_3d` (the raw triangulation) is still there as the
 unsmoothed, purely diagnostic view; the CLI falls back to it automatically
 if every SVI fit in a run fails to converge.
 
+**No-arbitrage checks.** A curve that fits the market points well can still
+be an invalid surface, and `surface/arbitrage.py` checks the two conditions
+that goodness of fit does not imply:
+
+- **Butterfly** (within one expiry): the implied risk-neutral density must
+  be non-negative. Gatheral's `g(k) >= 0` is that condition written in terms
+  of total variance -- `g < 0` means the slice prices an infinitesimal
+  butterfly negatively, i.e. pays you to hold a non-negative payoff. This is
+  *strictly stronger* than the non-negative-variance constraint
+  `fit_svi_slice` already enforces, and the test suite pins that down with a
+  curve whose total variance stays positive everywhere while its density
+  still goes negative.
+- **Calendar** (across expiries): total implied variance must be
+  non-decreasing in `T` at fixed forward log-moneyness. A drop means a
+  longer-dated option is cheaper than a shorter-dated one covering the same
+  events, which a calendar spread monetizes directly.
+
+Both are stated in *forward* log-moneyness `k = log(K/F)`, while the surface
+is built in spot log-moneyness `log(K/S)`; the checks convert by the drift
+`(r-q)T` rather than conflating the two.
+
+On the pictured run every slice was butterfly-clean (0 of 19), but **8 of 18
+adjacent expiry pairs showed a total-variance drop** -- worst, 2027-01-15
+sitting above 2027-01-29 by 0.00089 at `k = +0.180`. That is the expected
+result rather than a bug, and it is the honest limitation of what this
+project does: fitting each expiry *independently* leaves nothing tying the
+slices together in `T`, so nothing prevents them from crossing. Surface-level
+parameterizations (eSSVI and friends) exist precisely to impose that
+coupling. Reporting the violations is the useful half of the answer; fixing
+them requires a different fit.
+
+**Local vol.** `surface/local_vol.py` applies Dupire's formula to the fitted
+slices. Implied vol is an *average* of volatility along all paths to one
+strike and expiry; local vol is the *instantaneous* vol the underlying must
+have at a given spot and time to reproduce the whole surface. In terms of
+total variance,
+
+```
+sigma_LV**2(k, T) = (dw/dT) / g(k)
+```
+
+where `g` is exactly the butterfly function above -- not a coincidence but
+the same expression, which the test suite asserts to machine precision
+against an independent transcription of Gatheral eq. 1.10. That identity is
+what ties the two modules together: the denominator of local variance *is*
+the butterfly condition, so a slice implying a negative density produces a
+negative local variance at precisely the same strikes. Local vol does not
+merely look nicer on an arbitrage-free surface -- it fails to exist without
+one, and those grid points are returned as `NaN` and rendered as holes
+rather than square-rooted into a complex number.
+
+Because raw SVI is differentiable in closed form, `dw/dk` and `d2w/dk2`
+carry no discretization error at all. `dw/dT` is the exception, and it is
+where the accuracy floor sits.
+
+## Why the pictured run widens the ladder
+
+SPY lists *daily* expiries at the front, so the default `--max-expiries 6`
+selects the first six listed expiries -- which is six consecutive *days*,
+not the multi-month span the term structure lives on. The pictured run
+therefore passes `--max-expiries 22` to reach out to ~5 months.
+
+That density is also a numerical problem, not just a coverage one.
+Differencing total variance across a one-day gap divides each slice's own
+fit residual by `1/365`, amplifying it roughly 365-fold. Measured directly
+on the 19-slice live chain: every row whose neighbours sat one day apart
+produced local vols ranging from 0.007 to 0.905 with up to 54% of the row
+undefined, while every row with a gap of five days or more stayed inside a
+0.08-0.40 band with no gaps at all.
+
+`build_local_vol_surface` therefore thins the slices used for `dw/dT` to a
+minimum spacing (`--min-expiry-gap-days`, default 7). On the pictured run
+that leaves 12 of 19 slices and takes local vol coverage from 93.9% to
+100%. The thinning is deliberately *not* applied to the arbitrage checks:
+a variance drop between two consecutive daily expiries is a real property of
+the fitted surface and worth reporting. Only the division by a tiny `dT` is
+ill-conditioned, so only the differencing is thinned.
+
 ## A numerical caveat worth stating explicitly
 
 Very short-dated, deep ITM/OTM contracts have near-zero vega (`dPrice/dSigma`
@@ -146,6 +233,12 @@ filtered away.
 - Dividend yield is a flat continuous `q`, not a real dividend schedule.
 - Put-call parity checks are a data-quality sanity check on the chain, not a
   trading signal.
+- The no-arbitrage conditions are *reported*, not *enforced*. Each expiry is
+  fit independently, so nothing couples the slices in `T` and calendar
+  violations are possible by construction -- see the note above on eSSVI.
+- Local vol is the Dupire surface implied by today's quotes, not a
+  calibrated model with dynamics. It reprices vanillas by construction and
+  says nothing about whether the smile *evolves* the way it assumes.
 
 ## Acceptance checks
 
@@ -158,9 +251,25 @@ filtered away.
   dividends, the standard theoretical result).
 - The SVI fit round-trips: fitting a smile generated from known SVI
   parameters recovers the same curve to within `1e-3` in implied vol.
+- Gatheral's `g(k)` matches an independent transcription of the Dupire
+  local-variance denominator (eq. 1.10) to `1e-14` -- the identity
+  `surface/local_vol.py` relies on to divide by it.
+- The risk-neutral density implied by a fitted slice integrates to `1.0`
+  within `1e-6`, and goes negative on exactly the strikes where `g < 0`.
+- Local vol round-trips: a flat surface (`w = sigma**2 * T`, no smile)
+  returns local vol == implied vol == `sigma` to `1e-10`.
+- Local vol reproduces Derman's rule of thumb -- near the money the local
+  vol skew is ~2x the implied vol skew (asserted within 0.25 at the front
+  expiry), and the ratio decays with maturity as the short-dated
+  approximation predicts.
 
 ## Stretch goals (not implemented)
 
 - Real dividend yield data instead of a flat assumed `q`.
 - American option Greeks via finite-difference bump-and-reprice on the tree.
 - A second underlying for cross-asset comparison.
+- An eSSVI (or otherwise surface-level) fit that couples the expiry slices,
+  so calendar arbitrage is ruled out by construction rather than reported
+  after the fact.
+- Monte Carlo under the fitted local vol surface, to confirm it reprices the
+  vanillas it was built from.
