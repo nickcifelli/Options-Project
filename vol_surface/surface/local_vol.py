@@ -143,9 +143,23 @@ def build_local_vol_surface(
     w = np.vstack([np.asarray(fit.params.total_variance(k_grid + drift), dtype=float) for _, fit, _, drift in slices])
     g = np.vstack([butterfly_g(fit.params, k_grid, drift) for _, fit, _, drift in slices])
 
-    # Central differences in the interior, one-sided at the ends, and
-    # correct for the uneven expiry spacing a listed ladder always has.
-    dw_dT = np.gradient(w, T, axis=0)
+    # Central differences in the interior, correcting for the uneven expiry
+    # spacing a listed ladder always has. The front slice is anchored at
+    # T = 0, where total variance is known to be exactly zero, rather than
+    # left to `np.gradient`'s edge rule -- which would extrapolate the front
+    # derivative backwards from the *next two* expiries and discard a data
+    # point already in hand. The Monte Carlo repricing check in
+    # `pricing/monte_carlo.py` is what surfaced this: on a live SPY chain
+    # the unanchored edge rule mispriced expiries inside 9 days by -1.50 vol
+    # points, which anchoring cuts to -0.28 (and the 95th-percentile error
+    # across all expiries from 3.07 to 2.61). It does cost a little at the
+    # median, 0.50 to 0.56, because the front row also anchors the
+    # interpolation out to the second expiry; the anchored derivative is
+    # kept anyway, on the grounds that using a known boundary value beats
+    # extrapolating past it.
+    T_anchored = np.concatenate([[0.0], T])
+    w_anchored = np.vstack([np.zeros_like(w[0]), w])
+    dw_dT = np.gradient(w_anchored, T_anchored, axis=0)[1:]
 
     local_variance = np.divide(dw_dT, g, out=np.full_like(dw_dT, np.nan), where=g > 0)
     local_variance[local_variance < 0] = np.nan

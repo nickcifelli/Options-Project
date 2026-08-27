@@ -175,3 +175,22 @@ def test_gap_thinning_falls_back_rather_than_starving_the_difference():
 
     assert len(lv.T) == 3
     assert MIN_EXPIRY_GAP == pytest.approx(7.0 / 365.0)
+
+
+def test_front_slice_derivative_is_anchored_at_zero_total_variance():
+    # w(k, 0) = 0 is known exactly, so the front slice's dw/dT must be a
+    # difference against the origin rather than np.gradient's backward
+    # extrapolation from the next two expiries. Total variance rising
+    # steeply from 0 to the first expiry and then flattening is where the
+    # two disagree: the unanchored rule would read the flat part.
+    slices = {
+        AS_OF + dt.timedelta(days=d): SVIParams(a=a, b=0.0, rho=0.0, m=0.0, sigma=0.1)
+        for d, a in ((30, 0.02), (60, 0.021), (90, 0.022))
+    }
+    lv = build_local_vol_surface(_fits(slices), r=0.0, q=0.0, as_of=AS_OF)
+
+    front_local_variance = lv.local_vol[0] ** 2
+    anchored = 0.02 / (30 / 365)  # w0 / T0, the average over [0, T0]
+    unanchored = (0.021 - 0.02) / (30 / 365)  # what the flat tail alone implies
+
+    assert abs(front_local_variance[0] - anchored) < abs(front_local_variance[0] - unanchored)

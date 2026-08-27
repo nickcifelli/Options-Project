@@ -1,4 +1,4 @@
-"""CLI entry point: fetch -> build -> fit -> check -> localvol -> plot -> report."""
+"""CLI entry point: fetch -> build -> fit -> check -> localvol -> reprice -> plot."""
 
 from __future__ import annotations
 
@@ -10,12 +10,19 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from vol_surface.data.chain import fetch_chain
+from vol_surface.pricing.monte_carlo import reprice_chain
 from vol_surface.surface.arbitrage import check_butterfly, check_calendar
 from vol_surface.surface.build import build_surface
 from vol_surface.surface.local_vol import build_local_vol_surface
 from vol_surface.surface.parity import check_parity
 from vol_surface.surface.svi import fit_svi_surface
-from vol_surface.viz.plots import plot_local_vol_surface_3d, plot_surface_3d, plot_svi_fit, plot_svi_surface_3d
+from vol_surface.viz.plots import (
+    plot_local_vol_surface_3d,
+    plot_mc_reprice,
+    plot_surface_3d,
+    plot_svi_fit,
+    plot_svi_surface_3d,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -49,6 +56,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "roughly 365x -- noise, not term structure."
         ),
     )
+    parser.add_argument(
+        "--reprice",
+        action="store_true",
+        help=(
+            "Monte Carlo the fitted local vol surface and check it reprices the "
+            "quotes it was built from. Off by default because it is the only "
+            "stage that costs real time."
+        ),
+    )
+    parser.add_argument(
+        "--reprice-paths",
+        type=int,
+        default=50_000,
+        help="paths per expiry for --reprice (default: 50000)",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="seed the Monte Carlo for reproducible runs")
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached chain snapshot")
     parser.add_argument("--out", default=None, help="save the plot to this path instead of showing it interactively")
     return parser
@@ -111,7 +134,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_vol = None
         print(f"  skipped: {exc}", file=sys.stderr)
 
-    n_panels = 3 if local_vol is not None else 2
+    reprice = None
+    if args.reprice and local_vol is not None:
+        print(f"Repricing the chain under the local vol surface ({args.reprice_paths:,} paths/expiry)...")
+        reprice = reprice_chain(
+            local_vol,
+            surface,
+            S0=float(chain["spot"].iloc[0]),
+            r=args.r,
+            q=args.q,
+            n_paths=args.reprice_paths,
+            seed=args.seed,
+        )
+        solved = reprice.dropna(subset=["mc_iv"])
+        if solved.empty:
+            print("  no quotes repriced; skipping the repricing panel", file=sys.stderr)
+            reprice = None
+        else:
+            errors = solved["iv_error"].abs()
+            print(
+                f"  repriced {len(solved)} quotes across {solved['expiry'].nunique()} expiries "
+                f"(in the surface's own (k, T) window; the rest would only measure the clamp)"
+            )
+            print(f"  |IV error|: median {errors.median() * 100:.2f} vol pts, 95th pct {errors.quantile(0.95) * 100:.2f}")
+    elif args.reprice:
+        print("  no local vol surface to reprice against; skipping", file=sys.stderr)
+
+    n_panels = 2 + (local_vol is not None) + (reprice is not None)
     fig = plt.figure(figsize=(7 * n_panels, 6))
     plot_svi_fit(surface, svi_fits, ax=fig.add_subplot(1, n_panels, 1))
     if n_svi_ok:
@@ -121,6 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         plot_surface_3d(surface, ax=fig.add_subplot(1, n_panels, 2, projection="3d"))
     if local_vol is not None:
         plot_local_vol_surface_3d(local_vol, ax=fig.add_subplot(1, n_panels, 3, projection="3d"))
+    if reprice is not None:
+        plot_mc_reprice(reprice, ax=fig.add_subplot(1, n_panels, n_panels))
     fig.tight_layout()
 
     if args.out:

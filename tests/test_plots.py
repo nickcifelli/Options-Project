@@ -12,6 +12,7 @@ from vol_surface.surface.local_vol import build_local_vol_surface
 from vol_surface.surface.svi import SVIFitResult, SVIParams
 from vol_surface.viz.plots import (
     plot_local_vol_surface_3d,
+    plot_mc_reprice,
     plot_smiles,
     plot_surface_3d,
     plot_surface_heatmap,
@@ -148,3 +149,31 @@ def test_plot_local_vol_surface_3d_renders_the_dupire_grid():
     assert ax.get_zlabel() == "local vol"
     assert len(ax.collections) == 1
     plt.close(ax.figure)
+
+
+def test_plot_mc_reprice_draws_points_and_the_diagonal():
+    reprice = pd.DataFrame(
+        [
+            {
+                "expiry": dt.datetime(2026, 4, 1),
+                "strike": strike,
+                "option_type": "call",
+                "T": 0.25,
+                "market_iv": 0.20 + 0.001 * i,
+                "mc_iv": 0.20 + 0.001 * i + 0.0005,
+                "mc_price": 1.0,
+                "mc_std_error": 0.01,
+                "iv_std_error": 0.002,
+                "iv_error": 0.0005,
+            }
+            for i, strike in enumerate((95.0, 100.0, 105.0))
+        ]
+    )
+
+    fig, ax = plt.subplots()
+    result_ax = plot_mc_reprice(reprice, ax=ax)
+
+    assert result_ax is ax
+    assert ax.get_xlabel() == "market implied vol"
+    assert any("exact repricing" == line.get_label() for line in ax.get_lines())
+    plt.close(fig)

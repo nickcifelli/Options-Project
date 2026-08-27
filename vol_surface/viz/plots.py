@@ -179,3 +179,38 @@ def plot_local_vol_surface_3d(
     ax.set_zlabel("local vol")
     ax.set_title("Dupire local vol surface")
     return ax
+
+
+def plot_mc_reprice(reprice: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+    """Market IV vs. Monte-Carlo-repriced IV per strike, with MC error bars.
+
+    The comparison is drawn in vol points rather than price because a cent
+    of error means something very different on a one-week wing than on a
+    five-month at-the-money. Error bars are the Monte Carlo standard error
+    converted to vol via the local vega (`dSigma ~ dPrice / vega`), so a
+    point sitting off the diagonal by more than its bar is a real repricing
+    gap rather than simulation noise.
+    """
+    ax = ax or plt.gca()
+
+    for i, (expiry, group) in enumerate(reprice.dropna(subset=["mc_iv"]).groupby("expiry")):
+        ax.errorbar(
+            group["market_iv"],
+            group["mc_iv"],
+            yerr=group["iv_std_error"],
+            fmt="o",
+            markersize=3,
+            linewidth=0.8,
+            color=f"C{i % 10}",
+            label=pd.Timestamp(expiry).date().isoformat(),
+        )
+
+    lo = float(min(reprice["market_iv"].min(), reprice["mc_iv"].min()))
+    hi = float(max(reprice["market_iv"].max(), reprice["mc_iv"].max()))
+    ax.plot([lo, hi], [lo, hi], color="black", linewidth=1, linestyle="--", label="exact repricing")
+
+    ax.set_xlabel("market implied vol")
+    ax.set_ylabel("Monte Carlo implied vol")
+    ax.set_title("Local vol repricing check")
+    ax.legend(fontsize=7)
+    return ax
