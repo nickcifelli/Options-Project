@@ -15,6 +15,7 @@ from vol_surface.surface.arbitrage import check_butterfly, check_calendar
 from vol_surface.surface.build import build_surface
 from vol_surface.surface.local_vol import build_local_vol_surface
 from vol_surface.surface.parity import check_parity
+from vol_surface.surface.ssvi import fit_ssvi_surface
 from vol_surface.surface.svi import fit_svi_surface
 from vol_surface.viz.plots import (
     plot_local_vol_surface_3d,
@@ -31,6 +32,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-expiries", type=int, default=6)
     parser.add_argument("--r", type=float, default=0.04, help="flat risk-free rate")
     parser.add_argument("--q", type=float, default=0.0, help="flat continuous dividend yield")
+    parser.add_argument(
+        "--fit",
+        choices=("svi", "ssvi"),
+        default="svi",
+        help=(
+            "smile fit. 'svi' fits each expiry independently: the closest fit to "
+            "the quotes, and the one nothing prevents from crossing in T. 'ssvi' "
+            "fits one surface to every expiry at once (Gatheral-Jacquier), which "
+            "gives up some closeness and rules calendar arbitrage out by "
+            "construction instead of reporting it. Default: svi."
+        ),
+    )
+    parser.add_argument(
+        "--k-window",
+        choices=("slice", "union"),
+        default="slice",
+        help=(
+            "log-moneyness range each SSVI slice claims (--fit ssvi only). "
+            "'slice' is its own quoted ladder; 'union' is the widest ladder "
+            "quoted anywhere on the surface, which is defensible only because "
+            "the wings are fit globally -- it widens the local vol window, and "
+            "with it the range the repricing check can speak to. Default: slice."
+        ),
+    )
     parser.add_argument("--min-volume", type=int, default=1)
     parser.add_argument("--min-open-interest", type=int, default=1)
     parser.add_argument(
@@ -106,10 +131,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("No IVs solved; skipping plot.", file=sys.stderr)
         return 1
 
-    print("Fitting SVI smile per expiry...")
-    svi_fits = fit_svi_surface(surface)
+    if args.fit == "ssvi":
+        print("Fitting one SSVI surface across every expiry...")
+        ssvi = fit_ssvi_surface(surface, r=args.r, q=args.q, k_window=args.k_window)
+        if not ssvi.ok:
+            print(f"  SSVI fit failed: {ssvi.reason}", file=sys.stderr)
+            return 1
+        svi_fits = ssvi.slices
+        print(
+            f"  rho={ssvi.params.rho:+.3f} eta={ssvi.params.eta:.3f} gamma={ssvi.params.gamma:.3f}"
+            f" over {len(svi_fits)} expiries ({ssvi.n_parameters} parameters for {ssvi.n_quotes} quotes)"
+        )
+        print(f"  residual: {ssvi.rmse_vol * 100:.3f} vol points RMSE")
+    else:
+        print("Fitting SVI smile per expiry...")
+        svi_fits = fit_svi_surface(surface)
     n_svi_ok = sum(fit.ok for fit in svi_fits.values())
-    print(f"  SVI fit converged for {n_svi_ok}/{len(svi_fits)} expiries")
+    print(f"  {args.fit.upper()} fit converged for {n_svi_ok}/{len(svi_fits)} expiries")
 
     print("Checking static no-arbitrage conditions...")
     butterfly = check_butterfly(svi_fits, r=args.r, q=args.q)

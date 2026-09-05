@@ -2,6 +2,7 @@
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -10,16 +11,24 @@ from vol_surface.pricing.black_scholes import price as bs_price
 
 R, Q = 0.04, 0.0
 
+# A ladder wide and dense enough for a smile fit to have something to fit:
+# SVI needs six points per slice, and both fits balance the wings first.
+LADDER = tuple(np.linspace(80.0, 120.0, 17))
 
-def _synthetic_chain() -> pd.DataFrame:
+
+def _synthetic_chain(days=(30, 90), strikes=(90.0, 100.0, 110.0), skew=0.0) -> pd.DataFrame:
+    """A priced chain. `skew` tilts vol against log-moneyness so the fits
+    have a smile to find; the default is flat, which is all the older
+    tests need."""
     as_of = dt.datetime.now()
-    expiries = [as_of + dt.timedelta(days=30), as_of + dt.timedelta(days=90)]
+    expiries = [as_of + dt.timedelta(days=d) for d in days]
     rows = []
     for expiry in expiries:
         T = (expiry - as_of).days / 365.0
-        for strike in (90.0, 100.0, 110.0):
+        for strike in strikes:
+            sigma = 0.2 - skew * float(np.log(strike / 100.0))
             for option_type in ("call", "put"):
-                mid = bs_price(100.0, strike, T, R, 0.2, option_type, Q)
+                mid = bs_price(100.0, strike, T, R, sigma, option_type, Q)
                 rows.append(
                     {
                         "spot": 100.0,
@@ -60,6 +69,8 @@ def test_arg_parser_defaults():
     assert args.r == pytest.approx(0.04)
     assert args.q == pytest.approx(0.0)
     assert args.min_days_to_expiry == pytest.approx(2.0)
+    assert args.fit == "svi"
+    assert args.k_window == "slice"
 
 
 def test_main_excludes_near_expiry_contracts_by_default(monkeypatch, tmp_path):
@@ -86,3 +97,32 @@ def test_main_excludes_near_expiry_contracts_by_default(monkeypatch, tmp_path):
 
     exit_code = cli.main(["--ticker", "TEST"])
     assert exit_code == 1  # surface ends up empty since the only contract is 1 day out
+
+
+@pytest.mark.parametrize("k_window", ["slice", "union"])
+def test_main_runs_the_global_ssvi_fit(monkeypatch, tmp_path, k_window):
+    monkeypatch.setattr(cli, "fetch_chain", lambda *a, **k: _synthetic_chain(strikes=LADDER, skew=0.15))
+
+    out_path = tmp_path / f"ssvi-{k_window}.png"
+    exit_code = cli.main(["--ticker", "TEST", "--fit", "ssvi", "--k-window", k_window, "--out", str(out_path)])
+
+    assert exit_code == 0
+    assert out_path.stat().st_size > 0
+
+
+def test_main_reports_the_ssvi_surface_it_fitted(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "fetch_chain", lambda *a, **k: _synthetic_chain(strikes=LADDER, skew=0.15))
+
+    cli.main(["--ticker", "TEST", "--fit", "ssvi", "--out", str(tmp_path / "out.png")])
+
+    printed = capsys.readouterr().out
+    assert "rho=" in printed and "eta=" in printed and "gamma=" in printed
+    assert "calendar: 0/" in printed  # arbitrage-free by construction, not by luck
+
+
+def test_main_returns_nonzero_when_the_ssvi_fit_has_too_little_to_work_with(monkeypatch):
+    # One expiry is a slice, not a surface: the global fit has nothing to
+    # couple and says so rather than returning a degenerate surface.
+    monkeypatch.setattr(cli, "fetch_chain", lambda *a, **k: _synthetic_chain(days=(30,), strikes=LADDER, skew=0.15))
+
+    assert cli.main(["--ticker", "TEST", "--fit", "ssvi"]) == 1
