@@ -13,7 +13,14 @@ import datetime as dt
 import numpy as np
 import pytest
 
-from vol_surface.surface.local_vol import MIN_EXPIRY_GAP, build_local_vol_surface
+from vol_surface.surface.local_vol import (
+    MIN_EXPIRY_GAP,
+    LocalVolSampler,
+    LocalVolSurface,
+    build_local_vol_surface,
+    curve_at_time,
+    fill_holes,
+)
 from vol_surface.surface.svi import SVIFitResult, SVIParams
 
 AS_OF = dt.datetime(2026, 1, 1)
@@ -194,3 +201,66 @@ def test_front_slice_derivative_is_anchored_at_zero_total_variance():
     unanchored = (0.021 - 0.02) / (30 / 365)  # what the flat tail alone implies
 
     assert abs(front_local_variance[0] - anchored) < abs(front_local_variance[0] - unanchored)
+
+def test_fill_holes_bridges_gaps_along_k():
+    grid = np.array([[0.2, np.nan, 0.4], [0.3, 0.3, 0.3]])
+
+    filled = fill_holes(grid)
+
+    assert filled[0, 1] == pytest.approx(0.3)  # linear between 0.2 and 0.4
+    np.testing.assert_allclose(filled[1], grid[1])
+
+
+def test_fill_holes_replaces_a_fully_undefined_row_from_its_neighbour():
+    grid = np.array([[0.2, 0.2, 0.2], [np.nan, np.nan, np.nan], [0.5, 0.5, 0.5]])
+
+    filled = fill_holes(grid)
+
+    assert np.isfinite(filled).all()
+    np.testing.assert_allclose(filled[1], filled[0])  # nearest complete row wins ties low
+
+
+def test_fill_holes_raises_when_the_surface_is_empty():
+    with pytest.raises(ValueError, match="undefined everywhere"):
+        fill_holes(np.full((2, 3), np.nan))
+
+
+def test_curve_at_time_interpolates_between_rows_and_clamps_outside():
+    grid = np.array([[0.2, 0.2], [0.4, 0.4]])
+    T_grid = np.array([0.5, 1.5])
+
+    np.testing.assert_allclose(curve_at_time(grid, T_grid, 1.0), [0.3, 0.3])
+    np.testing.assert_allclose(curve_at_time(grid, T_grid, 0.1), grid[0])
+    np.testing.assert_allclose(curve_at_time(grid, T_grid, 9.9), grid[-1])
+
+
+def test_local_vol_sampler_is_the_same_reading_both_engines_use():
+    # A surface with a deliberate hole: the sampler must fill it, clamp
+    # outside the window in both axes, and interpolate inside -- the
+    # contract the Monte Carlo and the PDE both rely on.
+    surface = LocalVolSurface(
+        k=np.array([-0.1, 0.0, 0.1]),
+        T=np.array([0.25, 0.75]),
+        local_vol=np.array([[0.2, np.nan, 0.4], [0.4, 0.5, 0.6]]),
+        implied_vol=np.full((2, 3), 0.3),
+    )
+    sigma = LocalVolSampler.from_surface(surface)
+
+    assert sigma(0.0, 0.25) == pytest.approx(0.3)  # hole bridged along k
+    assert sigma(0.0, 0.5) == pytest.approx(0.4)  # halfway between the rows
+    assert sigma(-5.0, 0.25) == pytest.approx(0.2)  # clamped left, not extrapolated
+    assert sigma(0.0, 99.0) == pytest.approx(0.5)  # clamped in T
+
+
+def test_local_vol_sampler_matches_a_hand_rolled_read():
+    surface = LocalVolSurface(
+        k=np.array([-0.2, 0.0, 0.2]),
+        T=np.array([0.1, 0.4]),
+        local_vol=np.array([[0.25, 0.20, 0.18], [0.30, 0.26, 0.24]]),
+        implied_vol=np.full((2, 3), 0.3),
+    )
+    sigma = LocalVolSampler.from_surface(surface)
+
+    k, t = np.array([-0.15, 0.05]), 0.25
+    expected = np.interp(k, surface.k, curve_at_time(surface.local_vol, surface.T, t))
+    np.testing.assert_allclose(sigma(k, t), expected)

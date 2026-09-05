@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from vol_surface.pricing.pde import PDEResult
 from vol_surface.surface.build import year_fraction
 from vol_surface.surface.local_vol import LocalVolSurface
 from vol_surface.surface.svi import SVIFitResult
@@ -240,4 +241,76 @@ def plot_mc_reprice(reprice: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Ax
     ax.set_ylabel("Monte Carlo implied vol")
     ax.set_title("Local vol repricing check")
     _expiry_legend(ax, reprice["expiry"].nunique())
+    return ax
+
+
+def plot_early_exercise(
+    premium: pd.DataFrame,
+    boundary: PDEResult | None = None,
+    strike: float | None = None,
+    spot: float | None = None,
+    ax: plt.Axes | None = None,
+) -> plt.Axes:
+    """What the right to exercise early is worth across the chain, in vol points.
+
+    Drawn in vol points rather than currency for the same reason the
+    repricing panel is: it is the unit that compares a one-week wing to a
+    five-month at-the-money, and it puts the premium on the same axis as
+    the surface's own repricing error, so a premium smaller than that error
+    is visibly smaller rather than merely stated to be.
+
+    The call side sits flat on zero and is left in deliberately. With no
+    dividend yield there is never a reason to exercise a call early, and a
+    panel that showed only the puts would hide the fact that the solver
+    reproduces that rather than being told it. It is also where the
+    put/call split sits, which is why the curves stop at the money: each
+    strike contributes only its out-of-the-money leg, the same convention
+    the smile is fit under.
+
+    `boundary` adds an inset of the free boundary itself for one contract:
+    the spot below which the holder should stop waiting, plotted against
+    calendar time. That curve is what the optimal stopping problem is
+    really solving for -- the price is a by-product of knowing where it is.
+    """
+    ax = ax or plt.gca()
+
+    # The premium is a term-structure story before it is a strike story --
+    # it grows with maturity because the right being priced lasts longer --
+    # so maturity gets the colour axis and a continuous scale rather than a
+    # categorical key with one entry per listed expiry.
+    T = premium["T"]
+    norm = plt.Normalize(float(T.min()), float(T.max()))
+    colors = plt.get_cmap("viridis")
+
+    for expiry, group in premium.sort_values("moneyness").groupby("expiry"):
+        group = group.sort_values("moneyness")
+        ax.plot(
+            group["moneyness"],
+            group["premium_vol_points"] * 100,
+            marker="o",
+            markersize=3,
+            linewidth=0.8,
+            color=colors(norm(float(group["T"].iloc[0]))),
+        )
+
+    ax.axhline(0.0, color="black", linewidth=0.8, linestyle="--")
+    ax.set_xlabel("moneyness (K/S)")
+    ax.set_ylabel("early exercise premium (vol points)")
+    ax.set_title("Early exercise premium under local vol")
+    plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=colors), ax=ax, label="T (years)", pad=0.01)
+
+    if boundary is not None and boundary.exercise_boundary is not None:
+        inset = ax.inset_axes([0.55, 0.5, 0.42, 0.44])
+        days = (boundary.tau[-1] - boundary.tau) * 365.0
+        inset.plot(days, boundary.exercise_boundary, color="black", linewidth=1.2)
+        if strike is not None:
+            inset.axhline(strike, color="gray", linewidth=0.8, linestyle=":", label="K")
+        if spot is not None:
+            inset.axhline(spot, color="C3", linewidth=0.8, linestyle="--", label="spot")
+        inset.set_xlabel("days from today", fontsize=6)
+        inset.set_ylabel("exercise boundary", fontsize=6)
+        inset.set_title("free boundary, ATM put", fontsize=7)
+        inset.tick_params(labelsize=5)
+        inset.legend(fontsize=5)
+
     return ax

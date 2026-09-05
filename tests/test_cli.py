@@ -71,6 +71,7 @@ def test_arg_parser_defaults():
     assert args.min_days_to_expiry == pytest.approx(2.0)
     assert args.fit == "svi"
     assert args.k_window == "slice"
+    assert not args.american
 
 
 def test_main_excludes_near_expiry_contracts_by_default(monkeypatch, tmp_path):
@@ -126,3 +127,18 @@ def test_main_returns_nonzero_when_the_ssvi_fit_has_too_little_to_work_with(monk
     monkeypatch.setattr(cli, "fetch_chain", lambda *a, **k: _synthetic_chain(days=(30,), strikes=LADDER, skew=0.15))
 
     assert cli.main(["--ticker", "TEST", "--fit", "ssvi"]) == 1
+
+
+def test_main_prices_early_exercise_when_asked(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        cli, "fetch_chain", lambda *a, **k: _synthetic_chain(days=(30, 90, 180), strikes=LADDER, skew=0.15)
+    )
+
+    out_path = tmp_path / "american.png"
+    exit_code = cli.main(["--ticker", "TEST", "--american", "--out", str(out_path)])
+
+    assert exit_code == 0
+    assert out_path.stat().st_size > 0
+    printed = capsys.readouterr().out
+    assert "early-exercise premium" in printed
+    assert "free boundary today" in printed

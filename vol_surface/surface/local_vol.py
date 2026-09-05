@@ -88,6 +88,90 @@ class LocalVolSurface:
         return float(np.isfinite(self.local_vol).mean())
 
 
+def fill_holes(local_vol: np.ndarray) -> np.ndarray:
+    """Fill `NaN` gaps so a path can be stepped through them.
+
+    Holes are where the fitted surface implies no real local vol, so any
+    fill is an admission that the surface is incomplete rather than a
+    recovery of missing information. Within a row the gaps are bridged by
+    linear interpolation in `k`, where local vol is smooth; a row that is
+    entirely undefined takes the nearest row that isn't. Callers should
+    read `LocalVolSurface.coverage` alongside any result that needed this.
+    """
+    filled = np.array(local_vol, dtype=float, copy=True)
+    columns = np.arange(filled.shape[1])
+
+    for row in filled:
+        valid = np.isfinite(row)
+        if valid.any() and not valid.all():
+            row[~valid] = np.interp(columns[~valid], columns[valid], row[valid])
+
+    complete = np.array([np.isfinite(row).all() for row in filled])
+    if not complete.any():
+        raise ValueError("local vol surface is undefined everywhere; nothing to simulate")
+
+    usable = np.flatnonzero(complete)
+    for i in np.flatnonzero(~complete):
+        filled[i] = filled[usable[np.argmin(np.abs(usable - i))]]
+    return filled
+
+
+def curve_at_time(filled: np.ndarray, T_grid: np.ndarray, t: float) -> np.ndarray:
+    """Local vol as a function of `k` at time `t`, linear in `T` between rows.
+
+    Clamped outside the grid: the surface's earliest expiry is the earliest
+    information there is, and extrapolating local vol past the quoted
+    ladder would be inventing term structure.
+    """
+    if t <= T_grid[0]:
+        return filled[0]
+    if t >= T_grid[-1]:
+        return filled[-1]
+
+    upper = int(np.searchsorted(T_grid, t))
+    lower = upper - 1
+    weight = (t - T_grid[lower]) / (T_grid[upper] - T_grid[lower])
+    return (1 - weight) * filled[lower] + weight * filled[upper]
+
+
+@dataclass(frozen=True)
+class LocalVolSampler:
+    """A `sigma(k, t)` view of a `LocalVolSurface`: holes filled, edges clamped.
+
+    Both numerical engines that consume the surface -- the Monte Carlo in
+    `pricing/monte_carlo.py` and the finite-difference solver in
+    `pricing/pde.py` -- need the same thing from it: local vol at an
+    arbitrary forward log-moneyness and time, not just at grid points.
+    Sharing one sampler is what makes them cross-checkable: when the PDE
+    and the Monte Carlo agree on a European price they have agreed on the
+    surface too, rather than on two different readings of it.
+
+    Holes are filled once, up front (`fill_holes`), because a path or a
+    grid node can land in one and neither method can step through a `NaN`.
+    That is an admission the surface is incomplete, not a repair of it --
+    read `LocalVolSurface.coverage` alongside anything this produces.
+    """
+
+    k: np.ndarray
+    T: np.ndarray
+    values: np.ndarray
+
+    @classmethod
+    def from_surface(cls, surface: LocalVolSurface) -> LocalVolSampler:
+        return cls(k=surface.k, T=surface.T, values=fill_holes(surface.local_vol))
+
+    def __call__(self, k: np.ndarray | float, t: float) -> np.ndarray:
+        """Local vol at forward log-moneyness `k` and time `t`.
+
+        Linear in `T` between rows and linear in `k` within one, clamped
+        outside the fitted window in both axes -- extrapolating local vol
+        past the quoted ladder would be inventing term structure, and
+        `reprice_chain` skips quotes that land there rather than scoring
+        the clamp.
+        """
+        return np.interp(k, self.k, curve_at_time(self.values, self.T, t))
+
+
 def _thin_by_expiry_gap(slices: list[Slice], min_gap: float) -> list[Slice]:
     """Greedily drop slices closer than `min_gap` to the last one kept.
 

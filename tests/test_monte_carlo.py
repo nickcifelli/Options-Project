@@ -18,8 +18,6 @@ from vol_surface.pricing.black_scholes import price as bs_price
 from vol_surface.pricing.monte_carlo import (
     MCResult,
     REPRICE_COLUMNS,
-    _curve_at_time,
-    _fill_holes,
     atm_implied_vol,
     default_steps,
     price_european,
@@ -177,38 +175,6 @@ def test_confidence_interval_brackets_the_price():
 def test_default_steps_is_daily_with_a_floor():
     assert default_steps(1.0) == 252
     assert default_steps(1.0 / 365.0) == 20  # floor, not a two-step path
-
-
-def test_fill_holes_bridges_gaps_along_k():
-    grid = np.array([[0.2, np.nan, 0.4], [0.3, 0.3, 0.3]])
-
-    filled = _fill_holes(grid)
-
-    assert filled[0, 1] == pytest.approx(0.3)  # linear between 0.2 and 0.4
-    np.testing.assert_allclose(filled[1], grid[1])
-
-
-def test_fill_holes_replaces_a_fully_undefined_row_from_its_neighbour():
-    grid = np.array([[0.2, 0.2, 0.2], [np.nan, np.nan, np.nan], [0.5, 0.5, 0.5]])
-
-    filled = _fill_holes(grid)
-
-    assert np.isfinite(filled).all()
-    np.testing.assert_allclose(filled[1], filled[0])  # nearest complete row wins ties low
-
-
-def test_fill_holes_raises_when_the_surface_is_empty():
-    with pytest.raises(ValueError, match="undefined everywhere"):
-        _fill_holes(np.full((2, 3), np.nan))
-
-
-def test_curve_at_time_interpolates_between_rows_and_clamps_outside():
-    grid = np.array([[0.2, 0.2], [0.4, 0.4]])
-    T_grid = np.array([0.5, 1.5])
-
-    np.testing.assert_allclose(_curve_at_time(grid, T_grid, 1.0), [0.3, 0.3])
-    np.testing.assert_allclose(_curve_at_time(grid, T_grid, 0.1), grid[0])
-    np.testing.assert_allclose(_curve_at_time(grid, T_grid, 9.9), grid[-1])
 
 
 def test_atm_implied_vol_reads_the_surface_at_the_money():

@@ -12,6 +12,7 @@ import pandas as pd
 
 from vol_surface.data.chain import fetch_chain
 from vol_surface.pricing.monte_carlo import reprice_chain
+from vol_surface.pricing.pde import american_premium_chain, solve, surface_vol
 from vol_surface.surface.arbitrage import check_butterfly, check_calendar
 from vol_surface.surface.build import build_surface
 from vol_surface.surface.local_vol import build_local_vol_surface
@@ -19,6 +20,7 @@ from vol_surface.surface.parity import check_parity
 from vol_surface.surface.ssvi import fit_ssvi_surface
 from vol_surface.surface.svi import fit_svi_surface
 from vol_surface.viz.plots import (
+    plot_early_exercise,
     plot_local_vol_surface_3d,
     plot_mc_reprice,
     plot_surface_3d,
@@ -96,6 +98,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=50_000,
         help="paths per expiry for --reprice (default: 50000)",
+    )
+    parser.add_argument(
+        "--american",
+        action="store_true",
+        help=(
+            "price every quote again under early exercise, by Crank-Nicolson on "
+            "the same local vol surface, and report what the right is worth in "
+            "vol points. Adds a panel. Two PDE solves per quote, so it costs "
+            "real time."
+        ),
     )
     parser.add_argument("--seed", type=int, default=None, help="seed the Monte Carlo for reproducible runs")
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached chain snapshot")
@@ -199,7 +211,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.reprice:
         print("  no local vol surface to reprice against; skipping", file=sys.stderr)
 
-    n_panels = 2 + (local_vol is not None) + (reprice is not None)
+    premium, boundary, atm_strike = None, None, None
+    if args.american and local_vol is not None:
+        print("Pricing the chain again under early exercise (Crank-Nicolson)...")
+        S0 = float(chain["spot"].iloc[0])
+        premium = american_premium_chain(local_vol, surface, S0=S0, r=args.r, q=args.q)
+        if premium.empty:
+            print("  no quotes inside the surface window; skipping the panel", file=sys.stderr)
+            premium = None
+        else:
+            puts = premium[premium["option_type"] == "put"]
+            calls = premium[premium["option_type"] == "call"]
+            print(f"  priced {len(premium)} quotes twice each across {premium['expiry'].nunique()} expiries")
+            print(
+                f"  put early-exercise premium: median {puts['premium_vol_points'].median() * 100:.3f} vol pts, "
+                f"max {puts['premium_vol_points'].max() * 100:.3f} ({puts['premium_pct'].median() * 100:.2f}% of price)"
+            )
+            print(f"  call premium: max {calls['premium'].abs().max():.2e} (exactly zero is the theory at q=0)")
+
+            # One contract's free boundary for the panel inset: the
+            # at-the-money put at the longest expiry the surface covers.
+            longest = premium.loc[premium["T"].idxmax(), "expiry"]
+            candidates = premium[(premium["expiry"] == longest) & (premium["option_type"] == "put")]
+            if not candidates.empty:
+                row = candidates.loc[(candidates["moneyness"] - 1).abs().idxmin()]
+                atm_strike = float(row["strike"])
+                boundary = solve(
+                    S0, atm_strike, float(row["T"]), args.r, args.q, "put", surface_vol(local_vol), american=True
+                )
+                print(f"  free boundary today for the {atm_strike:g} put: {boundary.critical_spot_now:.2f} (spot {S0:.2f})")
+    elif args.american:
+        print("  no local vol surface to price against; skipping early exercise", file=sys.stderr)
+
+    n_panels = 2 + (local_vol is not None) + (reprice is not None) + (premium is not None)
     # Past three panels a single row is too wide to read, so the panels wrap.
     n_cols = n_panels if n_panels <= 3 else math.ceil(n_panels / 2)
     n_rows = math.ceil(n_panels / n_cols)
@@ -220,6 +264,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         panel += 1
     if reprice is not None:
         plot_mc_reprice(reprice, ax=axes(panel))
+        panel += 1
+    if premium is not None:
+        plot_early_exercise(
+            premium,
+            boundary=boundary,
+            strike=atm_strike,
+            spot=float(chain["spot"].iloc[0]),
+            ax=axes(panel),
+        )
     fig.tight_layout()
 
     if args.out:

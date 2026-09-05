@@ -60,7 +60,7 @@ from vol_surface.pricing.black_scholes import greeks as bs_greeks
 from vol_surface.pricing.black_scholes import price as bs_price
 from vol_surface.pricing.implied_vol import implied_vol
 from vol_surface.surface.build import year_fraction
-from vol_surface.surface.local_vol import LocalVolSurface
+from vol_surface.surface.local_vol import LocalVolSampler, LocalVolSurface, curve_at_time
 from vol_surface.surface.svi import otm_quotes
 
 _VALID_TYPES = ("call", "put")
@@ -110,52 +110,6 @@ def default_steps(T: float) -> int:
     return max(MIN_STEPS, int(np.ceil(T * STEPS_PER_YEAR)))
 
 
-def _fill_holes(local_vol: np.ndarray) -> np.ndarray:
-    """Fill `NaN` gaps so a path can be stepped through them.
-
-    Holes are where the fitted surface implies no real local vol, so any
-    fill is an admission that the surface is incomplete rather than a
-    recovery of missing information. Within a row the gaps are bridged by
-    linear interpolation in `k`, where local vol is smooth; a row that is
-    entirely undefined takes the nearest row that isn't. Callers should
-    read `LocalVolSurface.coverage` alongside any result that needed this.
-    """
-    filled = np.array(local_vol, dtype=float, copy=True)
-    columns = np.arange(filled.shape[1])
-
-    for row in filled:
-        valid = np.isfinite(row)
-        if valid.any() and not valid.all():
-            row[~valid] = np.interp(columns[~valid], columns[valid], row[valid])
-
-    complete = np.array([np.isfinite(row).all() for row in filled])
-    if not complete.any():
-        raise ValueError("local vol surface is undefined everywhere; nothing to simulate")
-
-    usable = np.flatnonzero(complete)
-    for i in np.flatnonzero(~complete):
-        filled[i] = filled[usable[np.argmin(np.abs(usable - i))]]
-    return filled
-
-
-def _curve_at_time(filled: np.ndarray, T_grid: np.ndarray, t: float) -> np.ndarray:
-    """Local vol as a function of `k` at time `t`, linear in `T` between rows.
-
-    Clamped outside the grid: the surface's earliest expiry is the earliest
-    information there is, and extrapolating local vol past the quoted
-    ladder would be inventing term structure.
-    """
-    if t <= T_grid[0]:
-        return filled[0]
-    if t >= T_grid[-1]:
-        return filled[-1]
-
-    upper = int(np.searchsorted(T_grid, t))
-    lower = upper - 1
-    weight = (t - T_grid[lower]) / (T_grid[upper] - T_grid[lower])
-    return (1 - weight) * filled[lower] + weight * filled[upper]
-
-
 @dataclass(frozen=True)
 class TerminalPaths:
     """Terminal spots under the local vol diffusion, plus what the control needs.
@@ -177,7 +131,7 @@ class TerminalPaths:
 
 def atm_implied_vol(local_vol: LocalVolSurface, T: float) -> float:
     """The surface's at-the-money implied vol at `T`, used as the control's vol."""
-    curve = _curve_at_time(local_vol.implied_vol, local_vol.T, T)
+    curve = curve_at_time(local_vol.implied_vol, local_vol.T, T)
     return float(np.interp(0.0, local_vol.k, curve))
 
 
@@ -217,7 +171,7 @@ def simulate_terminal(
             return np.concatenate([z, -z])
         return rng.standard_normal(n_sim)
 
-    filled = _fill_holes(local_vol.local_vol)
+    sigma_at = LocalVolSampler.from_surface(local_vol)
     dt = T / n_steps
     sqrt_dt = np.sqrt(dt)
     drift_rate = r - q
@@ -230,7 +184,7 @@ def simulate_terminal(
         # Forward log-moneyness of each path, the coordinate the surface
         # is indexed by; np.interp clamps at the edges of the fitted window.
         k = log_spot - np.log(S0) - drift_rate * t
-        sigma = np.interp(k, local_vol.k, _curve_at_time(filled, local_vol.T, t))
+        sigma = sigma_at(k, t)
 
         z = draw()
         log_spot += (drift_rate - 0.5 * sigma**2) * dt + sigma * sqrt_dt * z
