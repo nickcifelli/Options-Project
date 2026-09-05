@@ -61,6 +61,7 @@ from vol_surface.pricing.black_scholes import price as bs_price
 from vol_surface.pricing.implied_vol import implied_vol
 from vol_surface.surface.build import year_fraction
 from vol_surface.surface.local_vol import LocalVolSurface
+from vol_surface.surface.svi import otm_quotes
 
 _VALID_TYPES = ("call", "put")
 
@@ -358,8 +359,9 @@ def reprice_chain(
     """Reprice the surface's own quotes by simulation and compare in vol points.
 
     One simulation per expiry, shared across that expiry's strikes. Only
-    OTM quotes are repriced -- the same convention the smile is fit under,
-    and the tightly-quoted side of the chain.
+    OTM quotes are repriced, via the same `otm_quotes` selection the smile
+    was fit under, so the check cannot silently score a different set of
+    quotes than the surface was built from.
 
     Quotes outside the surface's own `(k, T)` window are skipped rather
     than clamped, in both axes. Simulation clamps local vol at the edge of
@@ -381,10 +383,7 @@ def reprice_chain(
     can be told apart from simulation noise.
     """
     as_of = as_of or dt.datetime.now()
-    otm = surface[
-        ((surface["option_type"] == "put") & (surface["moneyness"] < 1))
-        | ((surface["option_type"] == "call") & (surface["moneyness"] >= 1))
-    ]
+    otm = otm_quotes(surface)
     T_lo, T_hi = local_vol.T.min(), local_vol.T.max()
     k_lo, k_hi = local_vol.k.min(), local_vol.k.max()
     rows = []

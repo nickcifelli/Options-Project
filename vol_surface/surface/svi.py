@@ -71,6 +71,22 @@ class SVIFitResult:
         return self.params is not None
 
 
+def otm_quotes(surface: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the out-of-the-money leg at each strike.
+
+    Puts below spot, calls at or above it: the tightly-quoted side of the
+    chain and the usual convention for smile construction, so a strike is
+    not counted twice from both legs. Shared by every stage that has to
+    pick one leg per strike -- the smile fits and the Monte Carlo
+    repricing check -- so they cannot drift apart on which quotes they
+    mean by "the surface".
+    """
+    return surface[
+        ((surface["option_type"] == "put") & (surface["moneyness"] < 1))
+        | ((surface["option_type"] == "call") & (surface["moneyness"] >= 1))
+    ]
+
+
 def _initial_guess(k: np.ndarray, w: np.ndarray) -> np.ndarray:
     m0 = k[np.argmin(w)]
     sigma0 = max(float(np.std(k)), 0.1)
@@ -144,18 +160,12 @@ def fit_svi_slice(log_moneyness: np.ndarray, iv: np.ndarray, T: float) -> SVIFit
 def fit_svi_surface(surface: pd.DataFrame, as_of: dt.datetime | None = None) -> dict[pd.Timestamp, SVIFitResult]:
     """Fit one SVI slice per expiry in a surface built by `build_surface`.
 
-    Only OTM quotes are used per strike (puts below spot, calls at/above
-    it) -- the liquid, tightly-quoted side of the chain, and the usual
-    convention for smile construction so a strike isn't double-counted
-    from both legs.
+    Only OTM quotes are used per strike, via `otm_quotes` -- the same
+    selection the global SSVI fit and the repricing check make.
     """
     as_of = as_of or dt.datetime.now()
-    otm = surface[
-        ((surface["option_type"] == "put") & (surface["moneyness"] < 1))
-        | ((surface["option_type"] == "call") & (surface["moneyness"] >= 1))
-    ]
 
     return {
         expiry: fit_svi_slice(group["log_moneyness"].to_numpy(), group["iv"].to_numpy(), year_fraction(expiry, as_of))
-        for expiry, group in otm.groupby("expiry")
+        for expiry, group in otm_quotes(surface).groupby("expiry")
     }
