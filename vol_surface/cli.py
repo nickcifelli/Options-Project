@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Sequence
 
@@ -199,17 +200,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("  no local vol surface to reprice against; skipping", file=sys.stderr)
 
     n_panels = 2 + (local_vol is not None) + (reprice is not None)
-    fig = plt.figure(figsize=(7 * n_panels, 6))
-    plot_svi_fit(surface, svi_fits, ax=fig.add_subplot(1, n_panels, 1))
+    # Past three panels a single row is too wide to read, so the panels wrap.
+    n_cols = n_panels if n_panels <= 3 else math.ceil(n_panels / 2)
+    n_rows = math.ceil(n_panels / n_cols)
+    fig = plt.figure(figsize=(7 * n_cols, 6 * n_rows))
+
+    def axes(index: int, projection: str | None = None):
+        return fig.add_subplot(n_rows, n_cols, index, projection=projection)
+
+    plot_svi_fit(surface, svi_fits, ax=axes(1))
     if n_svi_ok:
-        plot_svi_surface_3d(svi_fits, ax=fig.add_subplot(1, n_panels, 2, projection="3d"))
+        plot_svi_surface_3d(svi_fits, ax=axes(2, "3d"))
     else:
         print("  no SVI fits converged; falling back to the raw triangulated surface", file=sys.stderr)
-        plot_surface_3d(surface, ax=fig.add_subplot(1, n_panels, 2, projection="3d"))
+        plot_surface_3d(surface, ax=axes(2, "3d"))
+    panel = 3
     if local_vol is not None:
-        plot_local_vol_surface_3d(local_vol, ax=fig.add_subplot(1, n_panels, 3, projection="3d"))
+        plot_local_vol_surface_3d(local_vol, ax=axes(panel, "3d"))
+        panel += 1
     if reprice is not None:
-        plot_mc_reprice(reprice, ax=fig.add_subplot(1, n_panels, n_panels))
+        plot_mc_reprice(reprice, ax=axes(panel))
     fig.tight_layout()
 
     if args.out:

@@ -13,6 +13,18 @@ from vol_surface.surface.local_vol import LocalVolSurface
 from vol_surface.surface.svi import SVIFitResult
 
 
+# A live SPY chain carries 20+ expiries, and a 20-entry categorical legend
+# takes more of a panel than the data does. Past this many, the per-expiry
+# colours still distinguish the curves but the key is dropped.
+MAX_LEGEND_ENTRIES = 10
+
+
+def _expiry_legend(ax: plt.Axes, n_expiries: int, **kwargs) -> None:
+    """Draw the per-expiry key, or drop it when there are too many to read."""
+    if n_expiries <= MAX_LEGEND_ENTRIES:
+        ax.legend(fontsize=8, **kwargs)
+
+
 def plot_smiles(surface: pd.DataFrame, x: str = "moneyness", ax: plt.Axes | None = None) -> plt.Axes:
     """IV vs. strike/moneyness for a single expiry, overlaid across expiries
     to show the term structure of the skew."""
@@ -23,7 +35,7 @@ def plot_smiles(surface: pd.DataFrame, x: str = "moneyness", ax: plt.Axes | None
     ax.set_xlabel(x)
     ax.set_ylabel("implied vol")
     ax.set_title("Implied vol smile by expiry")
-    ax.legend(fontsize=8)
+    _expiry_legend(ax, surface["expiry"].nunique())
     return ax
 
 
@@ -51,10 +63,25 @@ def plot_svi_fit(
             k_grid = np.linspace(lo, hi, 200)
             ax.plot(k_grid, fit.params.implied_vol(k_grid, T), color=color, linewidth=1.5)
 
+    # SPY lists puts far deeper than calls -- out to log-moneyness -2 on a
+    # live chain, where a near-worthless quote inverts to an implied vol
+    # near 1.0. Left unbounded those points compress the actual smile into
+    # a sliver. The axis is held to the fitted region instead; the points
+    # beyond it are still in `surface`, and `check_butterfly` still refuses
+    # to judge the curve out there for the same reason.
+    windows = [fit.k_range for fit in fits.values() if fit.ok and fit.k_range]
+    if windows:
+        lo, hi = min(w[0] for w in windows), max(w[1] for w in windows)
+        pad = 0.25 * (hi - lo)
+        ax.set_xlim(lo - pad, hi + pad)
+        visible = surface[surface["log_moneyness"].between(lo - pad, hi + pad)]
+        if not visible.empty:
+            ax.set_ylim(0, 1.15 * float(visible["iv"].max()))
+
     ax.set_xlabel("log-moneyness (log(K/S))")
     ax.set_ylabel("implied vol")
     ax.set_title("Implied vol smile: market vs. SVI fit")
-    ax.legend(fontsize=8)
+    _expiry_legend(ax, surface["expiry"].nunique())
     return ax
 
 
@@ -212,5 +239,5 @@ def plot_mc_reprice(reprice: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Ax
     ax.set_xlabel("market implied vol")
     ax.set_ylabel("Monte Carlo implied vol")
     ax.set_title("Local vol repricing check")
-    ax.legend(fontsize=7)
+    _expiry_legend(ax, reprice["expiry"].nunique())
     return ax
